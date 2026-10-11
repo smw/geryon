@@ -21,7 +21,8 @@ type Hub struct {
 
 	games       map[int]*Game // started games, which can be found and watched
 	lastGameID  int
-	activeGames int // includes games still starting up
+	activeGames int         // includes games still starting up
+	ended       []endedGame // the most recently ended games, newest first
 
 	// The lobby: one entry per running game, as last published by the game,
 	// and the connections currently looking at it.
@@ -190,6 +191,11 @@ func (h *Hub) removeGame(g *Game, reason, message, dump string) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	h.activeGames--
+	// Remember it for a while, so its log can still be read.
+	h.ended = append([]endedGame{{gameView: h.viewOf(g), Reason: reason, Message: message, Ended: time.Now(), log: g.log}}, h.ended...)
+	if len(h.ended) > endedGamesKept {
+		h.ended = h.ended[:endedGamesKept]
+	}
 	delete(h.games, g.id)
 	delete(h.dirty, g.id)
 	if _, shown := h.lobby[g.id]; !shown {

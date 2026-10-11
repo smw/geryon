@@ -87,30 +87,71 @@ func (h *Hub) sessionViews() []sessionView {
 	return out
 }
 
+// endedGame is a game that is over, kept for a while so that its log can
+// still be read.
+type endedGame struct {
+	gameView
+	Reason  string // as crawl gave it; "" if the game never started
+	Message string
+	Ended   time.Time
+	log     *gameLog
+}
+
+const endedGamesKept = 20
+
+// viewOf describes a game. The hub's lock must be held.
+func (h *Hub) viewOf(g *Game) gameView {
+	v := gameView{ID: g.id, Player: g.username, GameID: g.def.ID, Idle: g.IdleSeconds(),
+		Started: g.created, Binary: g.def.Str("crawl_binary", ""), PID: int(g.pid.Load())}
+	if e := h.lobby[g.id]; e != nil {
+		v.Spectators = e.spectators
+		str := func(key string) string {
+			if s, ok := e.where[key].(string); ok {
+				return s
+			}
+			return ""
+		}
+		if str("xl") != "" {
+			v.Where = "L" + str("xl") + " " + str("char") + ", " + str("place")
+		}
+		v.Milestone, _ = e.milestone.(string)
+	}
+	return v
+}
+
 func (h *Hub) gameViews() []gameView {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	out := make([]gameView, 0, len(h.games))
 	for _, g := range h.games {
-		v := gameView{ID: g.id, Player: g.username, GameID: g.def.ID, Idle: g.IdleSeconds(),
-			Started: g.created, Binary: g.def.Str("crawl_binary", ""), PID: int(g.pid.Load())}
-		if e := h.lobby[g.id]; e != nil {
-			v.Spectators = e.spectators
-			str := func(key string) string {
-				if s, ok := e.where[key].(string); ok {
-					return s
-				}
-				return ""
-			}
-			if str("xl") != "" {
-				v.Where = "L" + str("xl") + " " + str("char") + ", " + str("place")
-			}
-			v.Milestone, _ = e.milestone.(string)
-		}
-		out = append(out, v)
+		out = append(out, h.viewOf(g))
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].ID < out[j].ID })
 	return out
+}
+
+// endedGames returns the most recently ended games, newest first.
+func (h *Hub) endedGames() []endedGame {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return append([]endedGame(nil), h.ended...)
+}
+
+// gameLogByID finds the log of a running or recently ended game. ended is nil
+// while the game is running.
+func (h *Hub) gameLogByID(id int) (log *gameLog, view gameView, ended *endedGame, found bool) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if g := h.games[id]; g != nil {
+		return g.log, h.viewOf(g), nil, true
+	}
+	for i := range h.ended {
+		if h.ended[i].ID == id {
+			e := h.ended[i]
+			return e.log, e.gameView, &e, true
+		}
+	}
+	return nil, gameView{}, nil, false
 }
 
 func (h *Hub) sessionByID(id int) *Session {

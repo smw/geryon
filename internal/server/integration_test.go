@@ -983,6 +983,37 @@ func TestAdminAndMetrics(t *testing.T) {
 		}
 	}
 
+	// The game's log: linked from the page, followable, and kept after the end.
+	logLink := regexp.MustCompile(`href="(/admin/game/\d+/log)"`).FindStringSubmatch(page)
+	if logLink == nil {
+		t.Fatal("no log link on the admin page")
+	}
+	if viewer := get(logLink[1]); !strings.Contains(viewer, "Alice") || !strings.Contains(viewer, "running, crawl PID") {
+		t.Errorf("log viewer page: %.200s", viewer)
+	}
+	var gameLog struct {
+		Lines   []struct{ K, S string }
+		Next    int
+		Running bool
+	}
+	fetchLog := func(after int) {
+		t.Helper()
+		gameLog.Lines = nil
+		if err := json.Unmarshal([]byte(get(fmt.Sprintf("%s?format=json&after=%d", logLink[1], after))), &gameLog); err != nil {
+			t.Fatal(err)
+		}
+	}
+	fetchLog(0)
+	if !gameLog.Running || len(gameLog.Lines) == 0 || gameLog.Lines[0].K != "server" ||
+		!strings.Contains(gameLog.Lines[0].S, "Starting test for Alice") {
+		t.Errorf("game log: %+v", gameLog)
+	}
+	seen := gameLog.Next
+	fetchLog(seen)
+	if len(gameLog.Lines) != 0 || gameLog.Next != seen {
+		t.Errorf("game log after %d: %+v", seen, gameLog)
+	}
+
 	// An announcement reaches both.
 	do("announce", url.Values{"text": {"Server restarts at noon"}})
 	for _, c := range []*client{alice, bob} {
@@ -1010,6 +1041,17 @@ func TestAdminAndMetrics(t *testing.T) {
 	login(probe, "Alice", "pw")
 	if m := probe.expect("login_fail"); !strings.Contains(fmt.Sprint(m["reason"]), "disabled") {
 		t.Errorf("banned login: %v", m)
+	}
+	// The ended game is listed, and its log has grown by how it ended.
+	if page := get("/admin/"); !strings.Contains(page, "Recently ended (1)") || !strings.Contains(page, logLink[1]) {
+		t.Errorf("ended game is not listed with its log")
+	}
+	fetchLog(seen)
+	if gameLog.Running || len(gameLog.Lines) == 0 || !strings.Contains(gameLog.Lines[len(gameLog.Lines)-1].S, "terminated") {
+		t.Errorf("log of the ended game: %+v", gameLog)
+	}
+	if text := get(logLink[1] + "?format=text"); !strings.Contains(text, "geryon Starting test for Alice") {
+		t.Errorf("plain-text log: %.200s", text)
 	}
 	do("set-status", url.Values{"username": {"Alice"}, "status": {"ban"}, "on": {"0"}})
 	do("set-status", url.Values{"username": {"Bob"}, "status": {"admin"}, "on": {"1"}})
@@ -1051,6 +1093,27 @@ func TestAdminAndMetrics(t *testing.T) {
 		if !strings.Contains(metrics, want) {
 			t.Errorf("metrics lack %q", want)
 		}
+	}
+}
+
+func TestGameLog(t *testing.T) {
+	var l gameLog
+	total := gameLogLimit*2 + 7
+	for i := 0; i < total; i++ {
+		l.add("crawl", fmt.Sprint(i))
+	}
+	lines, next := l.since(0)
+	if next != total || len(lines) < gameLogLimit || len(lines) > gameLogLimit+gameLogLimit/10 {
+		t.Fatalf("after %d lines: kept %d, next %d", total, len(lines), next)
+	}
+	if first, last := lines[0].Text, lines[len(lines)-1].Text; first != fmt.Sprint(total-len(lines)) || last != fmt.Sprint(total-1) {
+		t.Errorf("kept lines %s..%s", first, last)
+	}
+	if lines, next := l.since(total - 3); len(lines) != 3 || lines[0].Text != fmt.Sprint(total-3) || next != total {
+		t.Errorf("since(total-3): %d lines, next %d", len(lines), next)
+	}
+	if lines, next := l.since(total + 5); len(lines) != 0 || next != total {
+		t.Errorf("since past the end: %d lines, next %d", len(lines), next)
 	}
 }
 

@@ -72,7 +72,10 @@ Set `admin_address` in `config.yml` (or pass `-admin`), for example
   and lets you save and stop a game, disconnect someone, send an announcement
   to everyone in a game, create accounts (even with public registration off),
   set passwords, ban accounts or put them on hold, make someone an admin, and
-  reload the game definitions.
+  reload the game definitions. Each game links to a live view of its log:
+  what the server did with it and everything crawl printed to stderr, which
+  is where crawl reports errors and where Lua scripts print. Logs are kept in
+  memory (the last 5000 lines) for running games and the last 20 that ended.
 - `/metrics` is a Prometheus endpoint: connections by state, games running,
   spectators, games started and ended by reason, session lengths, logins,
   traffic before and after compression, slow clients dropped, plus the usual

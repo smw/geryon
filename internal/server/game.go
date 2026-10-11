@@ -49,6 +49,7 @@ type Game struct {
 	lastActivity atomic.Int64 // unix nanoseconds
 	pid          atomic.Int64 // the crawl process, once started
 	created      time.Time    // never changes
+	log          *gameLog     // has its own lock
 
 	// ---- owned by the game's goroutine ----
 
@@ -152,6 +153,7 @@ func newGame(srv *Server, def *config.Game, username string, dglLess bool, playe
 		where:         map[string]any{},
 		formattedTime: now.Format("2006-01-02.15:04:05"),
 		created:       now,
+		log:           &gameLog{},
 		blocked:       map[string]bool{},
 		kicked:        map[string]kick{},
 	}
@@ -162,8 +164,11 @@ func newGame(srv *Server, def *config.Game, username string, dglLess bool, playe
 	return g
 }
 
+// logf logs to the server log and to the game's own log.
 func (g *Game) logf(format string, args ...any) {
-	log.Printf("P%-5d "+format, append([]any{g.id}, args...)...)
+	msg := fmt.Sprintf(format, args...)
+	log.Printf("P%-5d %s", g.id, msg)
+	g.log.add("server", msg)
 }
 
 func (g *Game) configPath(key string) string { return g.def.Str(key, g.username) }
@@ -871,7 +876,8 @@ func stripExt(path string) string {
 // onCrawlStderr watches crawl's stderr for a crash report (see do_crash_dump
 // in dbg-asrt.cc), to tell the player what happened and link the dump.
 func (g *Game) onCrawlStderr(line string) {
-	g.logf("ERR: %s", line)
+	log.Printf("P%-5d ERR: %s", g.id, line)
+	g.log.add("crawl", line)
 	if strings.TrimSpace(line) != "" {
 		g.lastStderr = line
 	}

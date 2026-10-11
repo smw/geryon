@@ -43,6 +43,7 @@ func (s *Server) adminRoutes() http.Handler {
 		http.Redirect(w, r, "/admin/", http.StatusFound)
 	})
 	mux.Handle("GET /admin/{$}", a.guard(a.page))
+	mux.Handle("GET /admin/game/{id}/log", a.guard(a.gameLog))
 	for action, handler := range map[string]func(r *http.Request) (string, error){
 		"stop-game":    a.stopGame,
 		"disconnect":   a.disconnect,
@@ -239,6 +240,7 @@ func (a *admin) page(w http.ResponseWriter, r *http.Request) {
 		"MemoryMB":   fmt.Sprintf("%.1f", float64(mem.Sys)/(1<<20)),
 		"Public":     net.JoinHostPort(s.cfg.BindAddress, strconv.Itoa(s.cfg.BindPort)),
 		"Games":      s.hub.gameViews(),
+		"Ended":      s.hub.endedGames(),
 		"Sessions":   sessions,
 		"Users":      users,
 		"UserError":  userErr,
@@ -322,17 +324,30 @@ var adminTemplate = template.Must(template.New("admin").Funcs(template.FuncMap{"
 
 <h2>Games in progress ({{len .Games}})</h2>
 {{if .Games}}<div class="scroll"><table>
-<tr><th>Player</th><th>Game</th><th>Where</th><th>Watching</th><th>Idle</th><th>Running</th><th>PID</th><th>Binary</th><th></th></tr>
+<tr><th>Player</th><th>Game</th><th>Where</th><th>Watching</th><th>Idle</th><th>Running</th><th>PID</th><th>Binary</th><th></th><th></th></tr>
 {{range .Games}}<tr>
   <td>{{.Player}}</td><td>{{.GameID}}</td>
   <td class="wrap">{{.Where}}{{if .Milestone}} <span class="dim">({{.Milestone}})</span>{{end}}</td>
   <td>{{.Spectators}}</td>
   <td>{{if gt .Idle 30}}{{.Idle}}s{{else}}<span class="dim">active</span>{{end}}</td>
   <td>{{ago $.Now .Started}}</td><td>{{.PID}}</td><td><code>{{.Binary}}</code></td>
+  <td><a href="/admin/game/{{.ID}}/log">Log</a></td>
   <td><form method="post" action="/admin/stop-game"><input type="hidden" name="token" value="{{$.Token}}">
       <input type="hidden" name="id" value="{{.ID}}"><button title="Crawl saves the game and exits; the player returns to the lobby">Save &amp; stop</button></form></td>
 </tr>{{end}}
 </table></div>{{else}}<p class="dim">Nobody is playing.</p>{{end}}
+
+{{if .Ended}}
+<h2>Recently ended ({{len .Ended}})</h2>
+<div class="scroll"><table>
+<tr><th>Player</th><th>Game</th><th>Ended</th><th>Lasted</th><th>How</th><th></th></tr>
+{{range .Ended}}<tr>
+  <td>{{.Player}}</td><td>{{.GameID}}</td><td>{{ago $.Now .Ended}} ago</td><td>{{ago .Ended .Started}}</td>
+  <td class="wrap">{{if .Reason}}{{.Reason}}{{else}}<span class="dim">never started</span>{{end}}{{if .Message}} <span class="dim">({{.Message}})</span>{{end}}</td>
+  <td><a href="/admin/game/{{.ID}}/log">Log</a></td>
+</tr>{{end}}
+</table></div>
+{{end}}
 
 <h2>Connections ({{len .Sessions}})</h2>
 {{if .Sessions}}<div class="scroll"><table>
