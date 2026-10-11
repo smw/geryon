@@ -47,6 +47,8 @@ type Game struct {
 	done     chan struct{} // closed when run has returned
 
 	lastActivity atomic.Int64 // unix nanoseconds
+	pid          atomic.Int64 // the crawl process, once started
+	created      time.Time    // never changes
 
 	// ---- owned by the game's goroutine ----
 
@@ -81,6 +83,9 @@ type Game struct {
 	exitReason  string
 	exitMessage string
 	exitDumpURL string
+	lastStderr  string // crawl's most recent line on stderr
+
+	launched bool // crawl was started and the game registered
 
 	// Stopping: SIGHUP, then SIGABRT, then SIGKILL, kill_timeout apart.
 	stopping  bool
@@ -146,6 +151,7 @@ func newGame(srv *Server, def *config.Game, username string, dglLess bool, playe
 		useStdout:     true,
 		where:         map[string]any{},
 		formattedTime: now.Format("2006-01-02.15:04:05"),
+		created:       now,
 		blocked:       map[string]bool{},
 		kicked:        map[string]kick{},
 	}
@@ -214,6 +220,7 @@ func (g *Game) run() {
 		if r := recover(); r != nil {
 			g.logf("Internal error, ending game: %v\n%s", r, debug.Stack())
 			g.exitReason, g.exitMessage = "error", "The server hit an internal error; your game has been saved."
+			g.srv.metrics.failures.WithLabelValues("game").Inc()
 			g.emergencyStop()
 		}
 	}()
@@ -226,6 +233,8 @@ func (g *Game) run() {
 		return
 	}
 	g.srv.hub.addGame(g)
+	g.launched = true
+	g.srv.metrics.gamesStarted.WithLabelValues(g.def.ID).Inc()
 	player.send(encodeMessage("game_started", nil))
 	g.restoreBlocklist()
 	g.notify(player, "'/help' to see available chat commands")
@@ -434,6 +443,7 @@ func (g *Game) launch() bool {
 		return false
 	}
 	g.term = term
+	g.pid.Store(int64(term.pid))
 	g.lastActivity.Store(time.Now().UnixNano())
 
 	if err := g.writeLock(); err != nil {
@@ -551,6 +561,14 @@ func (g *Game) loop() {
 			}
 			g.logf("Crawl PID %d terminated.", term.pid)
 			g.term = nil
+			if g.exitReason == "" && term.failed {
+				// Crawl died without saying why. Tell the player something,
+				// with its last words if it had any.
+				g.exitReason, g.exitMessage = "error", "The game ended unexpectedly."
+				if g.lastStderr != "" {
+					g.exitMessage += "\n" + g.lastStderr
+				}
+			}
 			return
 		}
 	}
@@ -612,6 +630,16 @@ func (g *Game) emergencyStop() {
 
 // finish tidies up after the game and tells everyone it is over.
 func (g *Game) finish() {
+	if m := g.srv.metrics; g.launched {
+		reason := g.exitReason
+		if reason == "" {
+			reason = "unknown"
+		}
+		m.gamesEnded.WithLabelValues(g.def.ID, reason).Inc()
+		m.gameDuration.Observe(time.Since(g.created).Seconds())
+	} else {
+		m.startFailures.Inc()
+	}
 	if g.conn != nil {
 		g.conn.close()
 		g.conn = nil
@@ -749,6 +777,8 @@ func (g *Game) onCrawlMessage(msg string) {
 	// Terminal output is only relayed for the sake of wrapper scripts; once
 	// crawl itself speaks on the socket that stops.
 	g.useStdout = false
+	g.srv.metrics.crawlMessages.Inc()
+	g.srv.metrics.crawlBytes.Add(float64(len(msg)))
 
 	if !strings.HasPrefix(msg, "*") {
 		g.checkWhere()
@@ -842,6 +872,9 @@ func stripExt(path string) string {
 // in dbg-asrt.cc), to tell the player what happened and link the dump.
 func (g *Game) onCrawlStderr(line string) {
 	g.logf("ERR: %s", line)
+	if strings.TrimSpace(line) != "" {
+		g.lastStderr = line
+	}
 	morgueURL := g.def.MorgueURL(g.username)
 	switch {
 	case strings.HasPrefix(line, "ERROR"):
@@ -902,6 +935,7 @@ func (g *Game) input(msg string, obj map[string]any, raw []byte) {
 
 func (g *Game) sendToCrawl(data []byte) {
 	if g.conn != nil && !g.conn.sendMessage(data) {
+		g.srv.metrics.crawlDropped.Inc()
 		g.logf("Game socket buffer full; skipping message ('%.50s')!", data)
 	}
 }

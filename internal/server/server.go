@@ -39,6 +39,8 @@ type Server struct {
 	db      *userdb.DB
 	hub     *Hub
 	sockDir string // where the server's ends of the game sockets live
+	metrics *metrics
+	started time.Time
 
 	// The configured games. Replaced as a whole by ReloadGames; a running
 	// game keeps the definition it started with.
@@ -58,11 +60,19 @@ func New(cfg *config.Config, games *config.GameSet, db *userdb.DB) (*Server, err
 		cfg:          cfg,
 		db:           db,
 		hub:          newHub(),
+		started:      time.Now(),
 		static:       newAssetFS(os.DirFS(cfg.StaticPath)),
 		templates:    os.DirFS(cfg.TemplatePath),
 		clientAssets: map[string]*assetFS{},
 	}
 	s.games.Store(games)
+	s.metrics = newMetrics(s.hub, func() []string {
+		var ids []string
+		for _, g := range s.gameSet().Games {
+			ids = append(ids, g.ID)
+		}
+		return ids
+	})
 
 	for _, need := range []struct{ option, dir, file string }{
 		{"static_path", cfg.StaticPath, "scripts/client.js"},
@@ -93,11 +103,19 @@ func (s *Server) ReloadGames() error {
 		return nil
 	}
 	games, err := config.LoadGames(s.cfg)
+	s.metrics.reloads.WithLabelValues(result(err == nil)).Inc()
 	if err != nil {
 		return err
 	}
 	s.games.Store(games)
 	return nil
+}
+
+// announce shows text to everyone who is in a game.
+func (s *Server) announce(text string) {
+	for _, sess := range s.hub.allSessions() {
+		sess.post(func() { sess.announce(text) })
+	}
 }
 
 // version returns the crawl version to tell browsers, which they use to key
@@ -151,6 +169,19 @@ func (s *Server) Run(ctx context.Context) error {
 			}
 		}
 	}()
+
+	// The private listener, if configured: admin pages and metrics.
+	if s.cfg.AdminAddress != "" {
+		adminLn, err := net.Listen("tcp", s.cfg.AdminAddress)
+		if err != nil {
+			ln.Close()
+			return fmt.Errorf("admin_address: %w", err)
+		}
+		adminServer := &http.Server{Handler: s.adminRoutes(), ReadHeaderTimeout: 30 * time.Second}
+		go adminServer.Serve(adminLn)
+		defer adminServer.Close()
+		log.Printf("Admin pages and metrics on http://%s/admin/ and /metrics (no login: keep this address private)", adminLn.Addr())
+	}
 
 	httpServer := &http.Server{Handler: s.routes(), ReadHeaderTimeout: 30 * time.Second}
 	serveErr := make(chan error, 1)

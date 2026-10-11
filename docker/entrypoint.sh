@@ -40,4 +40,6 @@ if [ "$interval" -gt 0 ]; then
     ) &
 fi
 
-exec geryon -server-path /data/server
+# The admin pages and metrics listen on their own port. They have no login, so
+# compose.yaml publishes that port on the host's loopback address only.
+exec geryon -server-path /data/server -admin "${GERYON_ADMIN_ADDRESS:-0.0.0.0:8081}"

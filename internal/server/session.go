@@ -50,6 +50,8 @@ type Session struct {
 
 	receivedPong bool
 	lastAction   time.Time
+	connected    time.Time   // never changes
+	reported     sessionInfo // what the hub was last told about this session
 
 	// Written by the writer goroutine.
 	totalBytes, sentBytes atomic.Int64
@@ -76,8 +78,13 @@ func (srv *Server) newSession(ws *websocket.Conn, ip string) {
 		events:   make(chan func(), 64),
 		gone:     make(chan struct{}),
 		saveInfo: map[string]*string{},
+
+		connected: time.Now(),
 	}
-	s.out = newOutbox(func() { ws.Close() })
+	s.out = newOutbox(func() {
+		srv.metrics.slowClients.Inc()
+		ws.Close()
+	})
 	go s.writeLoop()
 	go s.readLoop()
 	go s.run()
@@ -126,6 +133,7 @@ func (s *Session) readLoop() {
 		if err != nil {
 			return
 		}
+		s.srv.metrics.messagesReceived.Inc()
 		select {
 		case s.inbound <- data:
 		case <-s.gone:
@@ -143,11 +151,15 @@ func (s *Session) writeLoop() {
 	if s.deflate {
 		deflater, _ = flate.NewWriter(&compressed, flate.DefaultCompression)
 	}
+	m := s.srv.metrics
+	rawBytes, wireBytes := m.bytesSent.WithLabelValues("raw"), m.bytesSent.WithLabelValues("wire")
 	failed := false
 	for frame := range s.out.frames {
 		if failed {
 			continue
 		}
+		m.framesSent.Inc()
+		rawBytes.Add(float64(len(frame)))
 		s.totalBytes.Add(int64(len(frame)))
 		s.ws.SetWriteDeadline(time.Now().Add(60 * time.Second))
 		var err error
@@ -158,9 +170,11 @@ func (s *Session) writeLoop() {
 			data := compressed.Bytes()
 			data = data[:len(data)-4]
 			s.sentBytes.Add(int64(len(data)))
+			wireBytes.Add(float64(len(data)))
 			err = s.ws.WriteMessage(websocket.BinaryMessage, data)
 		} else {
 			s.sentBytes.Add(int64(len(frame)))
+			wireBytes.Add(float64(len(frame)))
 			err = s.ws.WriteMessage(websocket.TextMessage, []byte(frame))
 		}
 		if err != nil {
@@ -181,6 +195,7 @@ func (s *Session) run() {
 	defer func() {
 		if r := recover(); r != nil {
 			s.logf("Internal error, closing connection: %v\n%s", r, debug.Stack())
+			srv.metrics.failures.WithLabelValues("session").Inc()
 		}
 		close(s.gone)
 		s.leaveSeat()
@@ -206,6 +221,7 @@ func (s *Session) run() {
 		compression = "off, client request"
 	}
 	s.logf("Socket opened from ip %s (compression: %s).", s.remoteIP, compression)
+	srv.metrics.connections.Inc()
 
 	s.lastAction = time.Now()
 	s.send("ping", nil)
@@ -222,6 +238,7 @@ func (s *Session) run() {
 	}
 
 	for {
+		s.report()
 		select {
 		case data, open := <-s.inbound:
 			if !open {
@@ -234,6 +251,45 @@ func (s *Session) run() {
 			s.checkAlive()
 		}
 	}
+}
+
+// report tells the hub what this session is doing, when that has changed.
+func (s *Session) report() {
+	info := sessionInfo{user: s.username(), admin: s.isAdmin()}
+	switch {
+	case s.seat != nil && s.seat.player:
+		info.state, info.target = "playing", s.seat.gameID
+	case s.seat != nil:
+		info.state, info.target = "watching", s.seat.game.username
+	case s.inLobby:
+		info.state = "lobby"
+	}
+	if info != s.reported {
+		s.reported = info
+		s.srv.hub.setSessionInfo(s, info)
+	}
+}
+
+// announce shows a server-wide announcement to a session that is in a game:
+// in its chat window, and for the player also in crawl's message log.
+func (s *Session) announce(text string) {
+	seat := s.seat
+	if seat == nil {
+		return
+	}
+	s.send("server_announcement", M{"text": text})
+	if seat.player {
+		note := []byte(encodeMessage("server_announcement", M{"content": text}))
+		seat.game.do(func() { seat.game.sendToCrawl(note) })
+	}
+}
+
+// kick ends the session on an administrator's instruction.
+func (s *Session) kick(reason string) {
+	s.logf("Disconnecting %s: %s", s.name(), reason)
+	s.send("close", M{"reason": reason})
+	s.out.Close()
+	s.leaveSeat()
 }
 
 // checkAlive runs every connection_timeout seconds: the browser must have
@@ -327,7 +383,16 @@ func (s *Session) handle(raw []byte) {
 		s.getRC(str("game_id"))
 	case "set_rc":
 		s.setRC(str("game_id"), str("contents"))
-	case "forgot_password", "reset_password", "admin_announce", "admin_pw_reset", "admin_pw_reset_clear":
+	case "admin_announce":
+		// From the admin panel in the browser client, for accounts flagged admin.
+		if !s.isAdmin() {
+			s.logf("Non-admin user %s attempted an announcement.", s.name())
+			return
+		}
+		s.logf("User %s sent serverwide announcement: %s", s.name(), str("text"))
+		s.srv.announce(str("text"))
+		s.send("admin_log", M{"text": "Announcement made ('" + str("text") + "')"})
+	case "forgot_password", "reset_password", "admin_pw_reset", "admin_pw_reset_clear":
 		s.logf("Message '%s' from %s is not supported by this server.", msg, s.name())
 	default:
 		// Anything else from the player is for the game.
@@ -412,6 +477,7 @@ func (s *Session) completeLogin(username string) {
 
 func (s *Session) login(username, password string) {
 	ok, realName, reason := s.srv.db.PasswdMatch(username, password)
+	s.srv.metrics.countLogin("password", ok)
 	switch {
 	case ok:
 		s.logf("User %s logging in from %s.", realName, s.remoteIP)
@@ -427,6 +493,7 @@ func (s *Session) login(username, password string) {
 
 func (s *Session) tokenLogin(cookie string) {
 	username, ok := s.srv.hub.redeemToken(cookie)
+	s.srv.metrics.countLogin("token", ok)
 	if !ok {
 		s.logf("Wrong login token for user %s. (IP: %s)", username, s.remoteIP)
 		s.send("login_fail", nil)
@@ -450,7 +517,9 @@ func (s *Session) setLoginCookie() {
 }
 
 func (s *Session) register(username, password, email string) {
-	if msg := s.srv.db.Register(username, password, email); msg != "" {
+	msg := s.srv.db.Register(username, password, email)
+	s.srv.metrics.registrations.WithLabelValues(result(msg == "")).Inc()
+	if msg != "" {
 		s.logf("[Account] Registration attempt failed for user %s (IP: %s): %s", username, s.remoteIP, msg)
 		s.send("register_fail", M{"reason": msg})
 		return

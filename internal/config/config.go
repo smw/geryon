@@ -22,6 +22,14 @@ type Config struct {
 	BindAddress string `yaml:"bind_address"`
 	BindPort    int    `yaml:"bind_port"`
 
+	// A second, private listener for the admin pages and Prometheus metrics,
+	// such as "127.0.0.1:8081". Off when empty. The admin pages have no login:
+	// whoever can reach this address controls the server.
+	AdminAddress string `yaml:"admin_address"`
+	// Host names the admin pages may be reached under, besides localhost and
+	// IP addresses. Needed behind a reverse proxy with its own name.
+	AdminAllowedHosts []string `yaml:"admin_allowed_hosts"`
+
 	PasswordDB string `yaml:"password_db"`
 	SettingsDB string `yaml:"settings_db"`
 

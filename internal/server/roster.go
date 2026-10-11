@@ -188,6 +188,7 @@ func (g *Game) chat(seatID int, text string) {
 		st.send(encodeMessage("chat", M{"content": "Your account is restricted; chat unavailable"}))
 	case g.chatCommand(st, text):
 	case g.srv.cfg.MaxChatLength > 0:
+		g.srv.metrics.chatMessages.Inc()
 		g.broadcast(encodeMessage("chat", M{"content": "<span class='chat_sender'>" + st.name +
 			"</span>: <span class='chat_msg'>" + html.EscapeString(text) + "</span>"}))
 		// Crawl records chat in the game's notes.

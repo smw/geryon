@@ -18,6 +18,10 @@ services:
     restart: unless-stopped
     ports:
       - "8080:8080"
+      # Admin pages (http://localhost:8081/admin/) and Prometheus metrics
+      # (/metrics). They have no login: keep this bound to 127.0.0.1, and reach
+      # it from elsewhere through an SSH tunnel or an authenticating proxy.
+      - "127.0.0.1:8081:8081"
     volumes:
       - geryon-data:/data
     # On stop, every game in progress is told to save; give them time.

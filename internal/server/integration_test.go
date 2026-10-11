@@ -6,13 +6,16 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"html"
 	"io"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"reflect"
+	"regexp"
 	"strings"
 	"sync"
 	"testing"
@@ -866,6 +869,189 @@ func TestReloadGames(t *testing.T) {
 	bob.send(map[string]any{"msg": "play", "game_id": "newer"})
 	bob.expect("game_started")
 	bob.expect("map")
+}
+
+// freePort returns a TCP port nothing is listening on.
+func freePort(t *testing.T) int {
+	t.Helper()
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ln.Close()
+	return ln.Addr().(*net.TCPAddr).Port
+}
+
+// The private listener: metrics, and the admin pages with their actions.
+func TestAdminAndMetrics(t *testing.T) {
+	adminAddr := fmt.Sprintf("127.0.0.1:%d", freePort(t))
+	ts := startTestServer(t, func(cfg *config.Config) {
+		cfg.AdminAddress = adminAddr
+		cfg.NewAccountsDisabled = true
+	})
+	base := "http://" + adminAddr
+	get := func(path string) string {
+		t.Helper()
+		resp, err := http.Get(base + path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer resp.Body.Close()
+		body, _ := io.ReadAll(resp.Body)
+		if resp.StatusCode != 200 {
+			t.Fatalf("GET %s = %d: %s", path, resp.StatusCode, body)
+		}
+		return string(body)
+	}
+	page := get("/admin/")
+	m := regexp.MustCompile(`name="token" value="([0-9a-f]+)"`).FindStringSubmatch(page)
+	if m == nil {
+		t.Fatal("admin page has no form token")
+	}
+	token := m[1]
+	// post submits an admin form and returns the page it lands on.
+	post := func(action string, fields url.Values, withToken bool) (int, string) {
+		t.Helper()
+		if withToken {
+			fields.Set("token", token)
+		}
+		resp, err := http.PostForm(base+"/admin/"+action, fields)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer resp.Body.Close()
+		body, _ := io.ReadAll(resp.Body)
+		return resp.StatusCode, html.UnescapeString(string(body))
+	}
+	do := func(action string, fields url.Values) string {
+		t.Helper()
+		status, body := post(action, fields, true)
+		if status != 200 || !strings.Contains(body, "Done: ") {
+			t.Fatalf("admin %s %v: status %d, page says: %s", action, fields, status,
+				regexp.MustCompile(`(?s)<div class="note.*?</div>`).FindString(body))
+		}
+		return body
+	}
+
+	// The public listener serves neither.
+	for _, path := range []string{"/admin/", "/metrics"} {
+		if resp, err := http.Get("http://" + ts.addr + path); err != nil || resp.StatusCode != 404 {
+			t.Errorf("public GET %s: %v %v", path, err, resp.StatusCode)
+		}
+	}
+	// A page on another site cannot drive the admin pages: its form has no
+	// token, and a rebound DNS name is not an accepted host.
+	if status, _ := post("announce", url.Values{"text": {"x"}}, false); status != http.StatusForbidden {
+		t.Errorf("action without token: status %d", status)
+	}
+	req, _ := http.NewRequest("GET", base+"/admin/", nil)
+	req.Host = "evil.example"
+	if resp, err := http.DefaultClient.Do(req); err != nil || resp.StatusCode != http.StatusForbidden {
+		t.Errorf("admin page under a foreign host name: %v %v", err, resp.StatusCode)
+	}
+
+	// Accounts: create one although registration is closed, and use it.
+	do("create-user", url.Values{"username": {"Alice"}, "password": {"pw"}})
+	do("create-user", url.Values{"username": {"Bob"}, "password": {"pw"}})
+	if status, body := post("create-user", url.Values{"username": {"Alice"}, "password": {"pw"}}, true); status != 200 ||
+		!strings.Contains(body, "Failed: User already exists!") {
+		t.Errorf("duplicate user: %d", status)
+	}
+	alice := ts.connect("alice", false)
+	alice.expect("lobby_complete")
+	login := func(c *client, name, password string) {
+		c.send(map[string]any{"msg": "login", "username": name, "password": password})
+	}
+	login(alice, "Alice", "pw")
+	alice.expect("login_success")
+	alice.send(map[string]any{"msg": "play", "game_id": "test"})
+	alice.expect("game_started")
+	alice.expect("map")
+
+	bob := ts.connect("bob", false)
+	bob.expect("lobby_complete")
+	login(bob, "Bob", "pw")
+	bob.expect("login_success")
+	bob.send(map[string]any{"msg": "watch", "username": "Alice"})
+	bob.expect("watching_started")
+
+	page = get("/admin/")
+	for _, want := range []string{"Games in progress (1)", "Connections (2)", "playing test", "watching Alice",
+		"Accounts (2)", "Game definitions (1)"} {
+		if !strings.Contains(page, want) {
+			t.Errorf("admin page lacks %q", want)
+		}
+	}
+
+	// An announcement reaches both.
+	do("announce", url.Values{"text": {"Server restarts at noon"}})
+	for _, c := range []*client{alice, bob} {
+		if m := c.expect("server_announcement"); m["text"] != "Server restarts at noon" {
+			t.Errorf("%s: announcement %v", c.name, m)
+		}
+	}
+
+	// A new password takes effect; the old one stops working.
+	do("set-password", url.Values{"username": {"Bob"}, "password": {"better"}})
+	probe := ts.connect("probe", false)
+	probe.expect("lobby_complete")
+	login(probe, "Bob", "pw")
+	probe.expect("login_fail")
+	login(probe, "Bob", "better")
+	probe.expect("login_success")
+
+	// Banning Alice logs her out at once and saves her game.
+	do("set-status", url.Values{"username": {"Alice"}, "status": {"ban"}, "on": {"1"}})
+	if m := alice.expect("logout"); !strings.Contains(fmt.Sprint(m["reason"]), "disabled") {
+		t.Errorf("banned player: %v", m)
+	}
+	bob.expect("game_ended")
+	waitFor(t, "Alice's game to stop", func() bool { return len(dirEntries(t, filepath.Join(ts.dir, "rcs", "running"))) == 0 })
+	login(probe, "Alice", "pw")
+	if m := probe.expect("login_fail"); !strings.Contains(fmt.Sprint(m["reason"]), "disabled") {
+		t.Errorf("banned login: %v", m)
+	}
+	do("set-status", url.Values{"username": {"Alice"}, "status": {"ban"}, "on": {"0"}})
+	do("set-status", url.Values{"username": {"Bob"}, "status": {"admin"}, "on": {"1"}})
+
+	// Stopping a game and disconnecting a session.
+	carol := ts.connect("carol", false)
+	carol.expect("lobby_complete")
+	login(carol, "Alice", "pw")
+	carol.expect("login_success")
+	carol.send(map[string]any{"msg": "play", "game_id": "test"})
+	carol.expect("game_started")
+	carol.expect("map")
+	page = get("/admin/")
+	gameID := regexp.MustCompile(`action="/admin/stop-game">.*?\s*<input type="hidden" name="id" value="(\d+)"`).FindStringSubmatch(page)
+	if gameID == nil {
+		t.Fatal("no stop button on the admin page")
+	}
+	do("stop-game", url.Values{"id": {gameID[1]}})
+	carol.expect("game_ended")
+	carol.expect("lobby_complete")
+	sessID := regexp.MustCompile(`action="/admin/disconnect">.*?\s*<input type="hidden" name="id" value="(\d+)"`).FindStringSubmatch(page)
+	do("disconnect", url.Values{"id": {sessID[1]}})
+	do("reload-games", url.Values{})
+
+	metrics := get("/metrics")
+	for _, want := range []string{
+		`geryon_games_started_total{game_id="test"} 2`,
+		`geryon_games_ended_total{game_id="test",reason="disconnect"} 2`,
+		`geryon_logins_total{method="password",result="success"} 4`,
+		`geryon_logins_total{method="password",result="failure"} 2`,
+		`geryon_game_list_reloads_total{result="success"} 1`,
+		`geryon_connections{state="lobby"}`,
+		`geryon_games{game_id="test"} 0`,
+		`geryon_websocket_sent_bytes_total{stage="wire"}`,
+		`geryon_crawl_messages_total`,
+		`geryon_build_info{version="dev"} 1`,
+		`go_goroutines`,
+	} {
+		if !strings.Contains(metrics, want) {
+			t.Errorf("metrics lack %q", want)
+		}
+	}
 }
 
 func TestOutbox(t *testing.T) {

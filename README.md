@@ -12,8 +12,7 @@ Named after the gatekeeper of the Vestibule of Hell.
 Working for a personal or small shared server: accounts, lobby, playing,
 spectating, chat, rc editing, in-progress locks and ttyrecs.
 
-Not implemented: password reset by email, the admin panel's actions, ban
-lists, milestone files, the dgamelaunch status file, adopting games started
+Not implemented: password reset by email, name ban lists, milestone files, the dgamelaunch status file, adopting games started
 outside the server, and TLS (put a reverse proxy in front). `config.py` is
 not read; see Configuration.
 
@@ -63,6 +62,33 @@ Options: `-server-path DIR` (where `config.yml` and `games.d/` are; default
 Signals: `SIGHUP` or `SIGUSR1` rereads the game definitions without
 disturbing games in progress. `SIGINT` or `SIGTERM` saves every game and
 exits.
+
+## Admin pages and metrics
+
+Set `admin_address` in `config.yml` (or pass `-admin`), for example
+`127.0.0.1:8081`, to get a second, private listener:
+
+- `/admin/` shows the games in progress, who is connected and the accounts,
+  and lets you save and stop a game, disconnect someone, send an announcement
+  to everyone in a game, create accounts (even with public registration off),
+  set passwords, ban accounts or put them on hold, make someone an admin, and
+  reload the game definitions.
+- `/metrics` is a Prometheus endpoint: connections by state, games running,
+  spectators, games started and ended by reason, session lengths, logins,
+  traffic before and after compression, slow clients dropped, plus the usual
+  Go and process metrics. All of geryon's own series start with `geryon_`.
+
+**These pages have no login.** Whoever can reach the address controls the
+server, so bind it to loopback or a private network and never publish it. If
+you put it behind a reverse proxy with its own host name, list that name in
+`admin_allowed_hosts`; other host names are refused, as are form posts that
+did not come from the admin page itself.
+
+In the Docker setup the listener is on port 8081, published to the host's
+loopback only: <http://localhost:8081/admin/>.
+
+Accounts flagged as admin can also send announcements from the admin panel
+of the game's own web client.
 
 ## Configuration
 

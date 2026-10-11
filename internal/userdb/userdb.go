@@ -211,6 +211,12 @@ func (d *DB) Register(username, passwd, email string) string {
 	if d.cfg.NewAccountsDisabled {
 		return "New account creation is disabled."
 	}
+	return d.Create(username, passwd, email)
+}
+
+// Create makes an account whether or not registration is open to the public.
+// It returns an error message, or "".
+func (d *DB) Create(username, passwd, email string) string {
 	if passwd == "" {
 		return "The password can't be empty!"
 	}
@@ -242,17 +248,97 @@ func (d *DB) Register(username, passwd, email string) string {
 	return ""
 }
 
+// List returns every account, by name.
+func (d *DB) List() ([]UserInfo, error) {
+	rows, err := d.users.Query(
+		"SELECT id, username, email, flags FROM dglusers ORDER BY username COLLATE NOCASE")
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []UserInfo
+	for rows.Next() {
+		var u UserInfo
+		var email sql.NullString
+		var flags sql.NullInt64
+		if err := rows.Scan(&u.ID, &u.Username, &email, &flags); err != nil {
+			return nil, err
+		}
+		u.Email, u.Flags = email.String, int(flags.Int64)
+		out = append(out, u)
+	}
+	return out, rows.Err()
+}
+
+// The states an administrator can put an account in.
+const (
+	// StatusBanned: cannot log in.
+	StatusBanned = "ban"
+	// StatusHold: can log in and play, but is hidden from the lobby, cannot
+	// chat or spectate, and leaves no bones files.
+	StatusHold = "hold"
+	// StatusAdmin: sees restricted games and the admin panel.
+	StatusAdmin = "admin"
+)
+
+const holdFlags = FlagLoginLock | FlagEmailLock | FlagPasswdLock | FlagAccountHold
+
+// SetStatus turns one of the Status states on or off for a user. A ban and a
+// hold exclude each other: setting one clears the other.
+func (d *DB) SetStatus(username, status string, on bool) error {
+	u := d.GetUserInfo(username)
+	if u == nil {
+		return errors.New("no such user: " + username)
+	}
+	flags := u.Flags
+	switch status {
+	case StatusAdmin:
+		flags &^= FlagAdmin
+		if on {
+			flags |= FlagAdmin
+		}
+	case StatusBanned:
+		flags &^= holdFlags
+		if on {
+			flags |= FlagLoginLock
+		}
+	case StatusHold:
+		flags &^= holdFlags
+		if on {
+			flags |= holdFlags
+		}
+	default:
+		return errors.New("unknown account status: " + status)
+	}
+	_, err := d.users.Exec("UPDATE dglusers SET flags=? WHERE id=?", flags, u.ID)
+	return err
+}
+
+// SetPassword replaces a user's password on an administrator's say-so,
+// whatever locks the account has. It returns an error message, or "".
+func (d *DB) SetPassword(username, passwd string) string {
+	u := d.GetUserInfo(username)
+	if u == nil {
+		return "No such user."
+	}
+	return d.changePassword(u, passwd)
+}
+
 // ChangePassword returns an error message for the user, or "".
 func (d *DB) ChangePassword(userID int64, passwd string) string {
-	if passwd == "" {
-		return "The password can't be empty."
-	}
 	u := d.getUserByID(userID)
 	if u == nil {
 		return "Invalid account!"
 	}
 	if u.Flags&FlagPasswdLock != 0 {
 		return "Account has a password lock!"
+	}
+	return d.changePassword(u, passwd)
+}
+
+func (d *DB) changePassword(u *UserInfo, passwd string) string {
+	if passwd == "" {
+		return "The password can't be empty."
 	}
 	hash, err := d.encrypt(passwd)
 	if err == nil {

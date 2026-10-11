@@ -31,12 +31,15 @@ func main() {
 		"directory holding config.yml and games.d/")
 	port := flag.Int("port", 0, "port to listen on, overriding bind_port")
 	address := flag.String("address", "", "address to listen on, overriding bind_address")
+	adminAddress := flag.String("admin", "",
+		"address for the admin pages and /metrics, overriding admin_address (e.g. 127.0.0.1:8081); keep it private")
 	showVersion := flag.Bool("version", false, "print the version and exit")
 	flag.Parse()
 	if *showVersion {
 		fmt.Println("geryon", version)
 		return
 	}
+	server.BuildVersion = version
 	log.SetFlags(log.Ldate | log.Ltime | log.Lmicroseconds)
 
 	cfg, err := config.Load(*serverPath)
@@ -48,6 +51,9 @@ func main() {
 	}
 	if *address != "" {
 		cfg.BindAddress = *address
+	}
+	if *adminAddress != "" {
+		cfg.AdminAddress = *adminAddress
 	}
 
 	games := &config.GameSet{}

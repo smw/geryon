@@ -26,6 +26,7 @@ type terminal struct {
 	output chan []string // lines printed to the terminal; a read with no complete line sends nil
 	stderr chan string   // lines printed to stderr
 	exited chan struct{} // closed once the process is gone and both channels above are closed
+	failed bool          // exited with an error status or by a signal; valid once exited is closed
 	input  chan []byte
 
 	mu     sync.Mutex // guards the ttyrec, written by the terminal reader
@@ -134,7 +135,7 @@ func startTerminal(call []string, env map[string]string, cwd string, size [2]int
 	}()
 
 	go func() {
-		cmd.Wait()
+		t.failed = cmd.Wait() != nil
 		// Let the readers pick up anything still buffered, but don't wait
 		// forever on a descendant that kept the terminal open.
 		for _, done := range []chan struct{}{ptyDone, errDone} {

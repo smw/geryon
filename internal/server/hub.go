@@ -16,7 +16,7 @@ import (
 type Hub struct {
 	mu sync.Mutex
 
-	sessions     map[*Session]struct{}
+	sessions     map[*Session]sessionInfo // each session's state, as it last reported it
 	shuttingDown bool
 
 	games       map[int]*Game // started games, which can be found and watched
@@ -86,7 +86,7 @@ func (e *lobbyEntry) message() string {
 
 func newHub() *Hub {
 	return &Hub{
-		sessions: map[*Session]struct{}{},
+		sessions: map[*Session]sessionInfo{},
 		games:    map[int]*Game{},
 		lobby:    map[int]*lobbyEntry{},
 		dirty:    map[int]struct{}{},
@@ -107,7 +107,7 @@ func (h *Hub) addSession(s *Session, limit int) (ok bool, refusal string) {
 	case len(h.sessions) >= limit:
 		return false, "The maximum number of connections has been reached, sorry :("
 	}
-	h.sessions[s] = struct{}{}
+	h.sessions[s] = sessionInfo{}
 	return true, ""
 }
 

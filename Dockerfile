@@ -36,5 +36,6 @@ ENV LANG=C.UTF-8
 USER crawl
 WORKDIR /data
 VOLUME /data
-EXPOSE 8080
+# 8080: the game. 8081: admin pages and /metrics, which have no login.
+EXPOSE 8080 8081
 ENTRYPOINT ["geryon-entrypoint"]
