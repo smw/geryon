@@ -63,10 +63,21 @@ jobs:
           # All history, without file contents: crawl's version comes from `git describe`.
           git clone --filter=blob:none --no-checkout https://github.com/crawl/crawl.git crawl
           git -C crawl checkout --detach "${{ steps.crawl.outputs.sha }}"
-          # Crawl's Makefile has a race between generating and copying some
-          # client files under -j; a second pass picks up where the first stopped.
-          build() { make -C crawl/crawl-ref/source -j"$(nproc)" WEBTILES=y; }
-          build || build
+          # Crawl's Makefile cannot build rltiles/status-icon-sizes.js on demand
+          # (the rule's target name lacks a slash), so a parallel build stops at
+          # "No rule to make target" unless the file already exists. Generate
+          # it first, under either spelling of the target.
+          src=crawl/crawl-ref/source
+          make -C "$src" WEBTILES=y rltilesstatus-icon-sizes.h \
+            || make -C "$src" WEBTILES=y rltiles/status-icon-sizes.h || true
+          if ! make -C "$src" -j"$(nproc)" WEBTILES=y > crawl-build.log 2>&1; then
+            tail -n 60 crawl-build.log
+            # Job logs need a login to read; annotations do not.
+            grep -E '(\*\*\*|[Ee]rror)' crawl-build.log | tail -n 8 | while IFS= read -r line; do
+              echo "::error title=crawl build::$line"
+            done
+            exit 1
+          fi
           # Only the built tree is needed from here on.
           rm -rf crawl/.git
           find crawl \( -name '*.o' -o -name '*.d' \) -delete

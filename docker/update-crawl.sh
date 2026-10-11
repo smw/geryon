@@ -48,10 +48,13 @@ else
     echo "Building crawl $version..."
     jobs=$(nproc)
     # shellcheck disable=SC2086
-    build_crawl() { make -C src/crawl-ref/source -j"$jobs" WEBTILES=y ${CRAWL_MAKE_ARGS:-} > /data/build.log 2>&1; }
-    # Crawl's Makefile has a race between generating and copying some client
-    # files under -j; a second pass picks up where the first stopped.
-    if ! build_crawl && ! build_crawl; then
+    build_crawl() { make -C src/crawl-ref/source -j"$jobs" WEBTILES=y ${CRAWL_MAKE_ARGS:-} "$@" > /data/build.log 2>&1; }
+    # Crawl's Makefile cannot build rltiles/status-icon-sizes.js on demand (the
+    # rule's target name lacks a slash), so a parallel build stops at "No rule
+    # to make target" unless the file already exists. Generate it first, under
+    # either spelling of the target.
+    jobs=1 build_crawl rltilesstatus-icon-sizes.h || jobs=1 build_crawl rltiles/status-icon-sizes.h || true
+    if ! build_crawl; then
         echo "Build failed. Last lines of /data/build.log:"
         tail -n 40 /data/build.log
         exit 1
