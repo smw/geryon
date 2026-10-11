@@ -1,22 +1,23 @@
 // Command geryon is a webtiles server for Dungeon Crawl Stone Soup.
 //
-// Run it from crawl-ref/source, like the Python server it replaces: the paths
-// in the configuration (./rcs, ./crawl, ./webserver/...) are relative to that
-// directory.
+// Run it from crawl-ref/source of a crawl checkout built with
+// `make WEBTILES=y`, like the Python server it replaces: the paths in the
+// configuration (./rcs, ./crawl, ./webserver/...) are relative to that
+// directory, and crawl's browser client is served from ./webserver.
+//
+// SIGHUP or SIGUSR1 rereads the game definitions (games.d) without
+// disturbing games in progress. SIGINT or SIGTERM saves every game and exits.
 package main
 
 import (
 	"context"
 	"flag"
 	"fmt"
-	"io/fs"
 	"log"
 	"os"
 	"os/signal"
-	"strings"
 	"syscall"
 
-	assets "github.com/smw/geryon/client"
 	"github.com/smw/geryon/internal/config"
 	"github.com/smw/geryon/internal/server"
 	"github.com/smw/geryon/internal/userdb"
@@ -27,14 +28,13 @@ var version = "dev"
 
 func main() {
 	serverPath := flag.String("server-path", "./webserver",
-		"directory holding config.yml and games.d/ (both optional)")
+		"directory holding config.yml and games.d/")
 	port := flag.Int("port", 0, "port to listen on, overriding bind_port")
 	address := flag.String("address", "", "address to listen on, overriding bind_address")
 	showVersion := flag.Bool("version", false, "print the version and exit")
 	flag.Parse()
 	if *showVersion {
-		client, _ := assets.FS.ReadFile("version.txt")
-		fmt.Printf("geryon %s (built-in client from crawl %s)\n", version, strings.TrimSpace(string(client)))
+		fmt.Println("geryon", version)
 		return
 	}
 	log.SetFlags(log.Ldate | log.Ltime | log.Lmicroseconds)
@@ -50,14 +50,11 @@ func main() {
 		cfg.BindAddress = *address
 	}
 
-	var games *config.GameSet
+	games := &config.GameSet{}
 	if cfg.DGLMode {
-		builtinGames, _ := fs.Sub(assets.FS, "games.d")
-		if games, err = config.LoadGames(cfg, builtinGames); err != nil {
+		if games, err = config.LoadGames(cfg); err != nil {
 			log.Fatalf("Game configuration error: %v", err)
 		}
-	} else {
-		games = &config.GameSet{}
 	}
 
 	db, err := userdb.Open(cfg)
@@ -70,6 +67,18 @@ func main() {
 	if err != nil {
 		log.Fatalf("Startup error: %v", err)
 	}
+
+	reload := make(chan os.Signal, 1)
+	signal.Notify(reload, syscall.SIGHUP, syscall.SIGUSR1)
+	go func() {
+		for range reload {
+			log.Printf("Reloading game definitions...")
+			if err := srv.ReloadGames(); err != nil {
+				log.Printf("Game configuration error, keeping the previous definitions: %v", err)
+			}
+		}
+	}()
+
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 	if err := srv.Run(ctx); err != nil {

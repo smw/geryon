@@ -179,7 +179,7 @@ func (s *Server) handleIndex(w http.ResponseWriter, r *http.Request) {
 	}
 	page, err := s.renderTemplate("client.html", map[string]any{
 		"socket_server": protocol + r.Host + "/socket",
-		"game_version":  s.version,
+		"game_version":  s.version(),
 	})
 	if err != nil {
 		log.Printf("Error rendering client.html: %v", err)
@@ -221,5 +221,5 @@ func (s *Server) handleStatusLobby(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleStatusVersion(w http.ResponseWriter, r *http.Request) {
-	writeJSON(w, map[string]any{"webtiles": s.version, "server": "go"})
+	writeJSON(w, map[string]any{"webtiles": s.version(), "server": "geryon"})
 }

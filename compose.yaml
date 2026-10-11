@@ -1,0 +1,36 @@
+# A DCSS webtiles server on current trunk.
+#
+#   docker compose up -d        then open http://localhost:8080
+#
+# The first start builds crawl, which takes several minutes; follow it with
+# `docker compose logs -f`. After that the server checks for a new trunk once
+# a day and builds it in the background. New games use the new build; games
+# in progress carry on with the one they started on.
+#
+# Accounts, saves, rc files and the crawl builds live in the geryon-data
+# volume. Settings are in server/config.yml inside it.
+
+services:
+  geryon:
+    image: ghcr.io/smw/geryon:latest
+    build: .
+    init: true
+    restart: unless-stopped
+    ports:
+      - "8080:8080"
+    volumes:
+      - geryon-data:/data
+    # On stop, every game in progress is told to save; give them time.
+    stop_grace_period: 45s
+    environment:
+      # What to build: a branch, tag or commit of CRAWL_REPO.
+      CRAWL_REF: master
+      # CRAWL_REPO: https://github.com/crawl/crawl.git
+      # Seconds between checks for a new version; 0 turns updates off.
+      CRAWL_UPDATE_INTERVAL: "86400"
+      # Extra arguments for crawl's make. USE_DGAMELAUNCH=y is what public
+      # servers use: it turns off wizard mode, among other things.
+      # CRAWL_MAKE_ARGS: USE_DGAMELAUNCH=y
+
+volumes:
+  geryon-data:

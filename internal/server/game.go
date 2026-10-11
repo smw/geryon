@@ -20,7 +20,6 @@ import (
 	"syscall"
 	"time"
 
-	assets "github.com/smw/geryon/client"
 	"github.com/smw/geryon/internal/config"
 	"github.com/smw/geryon/internal/tmpl"
 )
@@ -640,16 +639,6 @@ func (g *Game) finish() {
 
 // ---- the browser client for this game's crawl version ----
 
-// clientFiles returns the game client directory: the game's client_path if it
-// exists on disk, otherwise the client built into the server.
-func (g *Game) clientFiles() fs.FS {
-	if info, err := os.Stat(g.clientPath); err == nil && info.IsDir() {
-		return os.DirFS(g.clientPath)
-	}
-	builtin, _ := fs.Sub(assets.FS, "game_data")
-	return builtin
-}
-
 // sendClient sends a seat the game's HTML, and registers the client's scripts
 // and tiles under /gamedata/<version>/. The version is a hash, so browsers
 // can cache each crawl version's client separately.
@@ -661,7 +650,8 @@ func (g *Game) sendClient(st *seat) {
 	sum := sha1.Sum([]byte(abs + g.crawlVersion))
 	version := hex.EncodeToString(sum[:])
 
-	files := g.clientFiles()
+	// The client that belongs to this game's crawl build.
+	files := os.DirFS(g.clientPath)
 	static, _ := fs.Sub(files, "static")
 	g.srv.registerClient(version, static)
 

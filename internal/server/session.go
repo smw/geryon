@@ -510,7 +510,7 @@ func (s *Session) changeEmail(email string) {
 }
 
 func (s *Session) rcfilePath(gameID string) string {
-	game := s.srv.games.Get(gameID)
+	game := s.srv.gameSet().Get(gameID)
 	if game == nil || s.user == nil {
 		return ""
 	}
@@ -580,7 +580,7 @@ func (s *Session) enterLobby() {
 	s.sendLobbyHTML()
 	if s.isAdmin() {
 		s.out.Send(frame(
-			encodeMessage("admin_log", M{"text": "Webtiles (" + s.srv.version + ") running the Go server"}),
+			encodeMessage("admin_log", M{"text": "Webtiles (" + s.srv.version() + ") running the Go server"}),
 			encodeMessage("admin_log", M{"text": s.srv.hub.describe()})))
 	}
 }
@@ -616,7 +616,7 @@ func (s *Session) gameAllowed(game *config.Game) bool {
 }
 
 func (s *Session) play(gameID string) {
-	game := s.srv.games.Get(gameID)
+	game := s.srv.gameSet().Get(gameID)
 	switch {
 	case game == nil:
 		s.goLobby("")
@@ -696,7 +696,7 @@ func (s *Session) watch(username string) {
 // as crawl reads them, so the game renders with the spectator's settings.
 func (s *Session) sendSpectatorOptions(g *Game, epoch uint64) {
 	def := g.def
-	if s.user == nil || s.srv.games.Get(def.ID) == nil || !def.Bool("send_json_options", true) {
+	if s.user == nil || s.srv.gameSet().Get(def.ID) == nil || !def.Bool("send_json_options", true) {
 		return
 	}
 	name := s.user.Username
@@ -786,7 +786,7 @@ func (s *Session) invalidateSaveSlot(slot string) {
 // updateSaveInfo records one binary's `-save-json` output: a map from game
 // mode to a description of the save in that mode's slot.
 func (s *Session) updateSaveInfo(binaryKey string, output []byte, ok bool) {
-	games := s.srv.games
+	games := s.srv.gameSet()
 	set := func(g, text string) { s.saveInfo[g] = &text }
 
 	var data map[string]struct {
@@ -819,7 +819,7 @@ func (s *Session) updateSaveInfo(binaryKey string, output []byte, ok bool) {
 // collectSaveInfo asks each crawl binary about the player's saves, for the
 // games whose cached info is missing, then calls done on this goroutine.
 func (s *Session) collectSaveInfo(done func()) {
-	games := s.srv.games
+	games := s.srv.gameSet()
 	username := s.user.Username
 	type check struct {
 		key    string
@@ -887,7 +887,7 @@ func (s *Session) gameLinksHTML() string {
 	var b strings.Builder
 	b.WriteString("Play now:\n")
 	rcs := map[string]bool{}
-	for _, g := range s.srv.games.Games {
+	for _, g := range s.srv.gameSet().Games {
 		if !s.gameAllowed(g) {
 			continue
 		}
@@ -955,7 +955,7 @@ func (s *Session) sendLobbyHTML() {
 	// On the first visit send the links straight away, without save info, so
 	// the player sees something if the crawl binaries are slow to answer.
 	if len(s.saveInfo) == 0 {
-		for _, g := range s.srv.games.Games {
+		for _, g := range s.srv.gameSet().Games {
 			s.saveInfo[g.ID] = nil
 		}
 		sendGameLinks()

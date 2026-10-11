@@ -1,8 +1,11 @@
 name: CI
 
-# Every push and pull request: build crawl (cached), run the tests against it,
-# and build the release archives. A tag starting with "v" also publishes those
-# archives as a GitHub release.
+# Every push and pull request: run the tests against a real crawl build, build
+# the release archives, and build the Docker image.
+#
+# Pushes to main also publish the image as ghcr.io/<repo>:edge. A tag starting
+# with "v" publishes it as :<tag> and :latest, and publishes the archives as a
+# GitHub release.
 on:
   push:
     branches: [main]
@@ -29,9 +32,12 @@ jobs:
         with:
           go-version-file: go.mod
 
-      # Crawl supplies the browser client that is embedded in the binary and
-      # the game the integration tests play. It is built from the commit named
-      # in CRAWL_VERSION, which takes a while, so the result is cached.
+      - name: Check formatting and vet
+        run: make check
+
+      # The integration tests play real games, so they need crawl. It is built
+      # from the commit named in CRAWL_VERSION, which takes a while, so the
+      # result is cached.
       - name: Read the crawl version
         id: crawl
         run: echo "sha=$(tr -d '[:space:]' < CRAWL_VERSION)" >> "$GITHUB_OUTPUT"
@@ -57,23 +63,16 @@ jobs:
           # All history, without file contents: crawl's version comes from `git describe`.
           git clone --filter=blob:none --no-checkout https://github.com/crawl/crawl.git crawl
           git -C crawl checkout --detach "${{ steps.crawl.outputs.sha }}"
-          make -C crawl/crawl-ref/source -j"$(nproc)" WEBTILES=y
+          # Crawl's Makefile has a race between generating and copying some
+          # client files under -j; a second pass picks up where the first stopped.
+          build() { make -C crawl/crawl-ref/source -j"$(nproc)" WEBTILES=y; }
+          build || build
           # Only the built tree is needed from here on.
           rm -rf crawl/.git
-          find crawl -name '*.o' -delete -o -name '*.d' -delete
-
-      - name: Copy the browser client into the build
-        run: scripts/sync-client.sh crawl/crawl-ref/source
-
-      - name: Check formatting and vet
-        run: |
-          test -z "$(gofmt -l .)" || { echo "gofmt needed:"; gofmt -l .; exit 1; }
-          go vet ./...
+          find crawl \( -name '*.o' -o -name '*.d' \) -delete
 
       - name: Test
-        run: go test -race ./...
-        env:
-          GERYON_CRAWL_SOURCE: ${{ github.workspace }}/crawl/crawl-ref/source
+        run: make test CRAWL_SOURCE=crawl/crawl-ref/source
 
       - name: Build release archives
         run: |
@@ -94,9 +93,37 @@ jobs:
           path: dist/
           if-no-files-found: error
 
+  image:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Build the image
+        run: docker build --build-arg VERSION="$(git describe --tags --always)" -t geryon .
+
+      - name: Check the image starts
+        run: docker run --rm --entrypoint geryon geryon -version
+
+      - name: Publish the image
+        if: github.event_name == 'push'
+        run: |
+          image=ghcr.io/${GITHUB_REPOSITORY,,}
+          if [ "$GITHUB_REF_TYPE" = tag ]; then tags="$GITHUB_REF_NAME latest"; else tags=edge; fi
+          echo "${{ github.token }}" | docker login ghcr.io -u "$GITHUB_ACTOR" --password-stdin
+          for tag in $tags; do
+            docker tag geryon "$image:$tag"
+            docker push "$image:$tag"
+          done
+
   release:
     if: github.ref_type == 'tag'
-    needs: build
+    needs: [build, image]
     runs-on: ubuntu-24.04
     permissions:
       contents: write

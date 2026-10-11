@@ -27,21 +27,24 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
-	assets "github.com/smw/geryon/client"
 	"github.com/smw/geryon/internal/config"
 	"github.com/smw/geryon/internal/userdb"
 )
 
 type Server struct {
 	cfg     *config.Config
-	games   *config.GameSet
 	db      *userdb.DB
 	hub     *Hub
-	version string // crawl version the server was built alongside
 	sockDir string // where the server's ends of the game sockets live
 
+	// The configured games. Replaced as a whole by ReloadGames; a running
+	// game keeps the definition it started with.
+	games atomic.Pointer[config.GameSet]
+
+	// Crawl's browser client, served from the crawl checkout.
 	static    *assetFS
 	templates fs.FS
 
@@ -53,29 +56,26 @@ type Server struct {
 func New(cfg *config.Config, games *config.GameSet, db *userdb.DB) (*Server, error) {
 	s := &Server{
 		cfg:          cfg,
-		games:        games,
 		db:           db,
 		hub:          newHub(),
-		version:      loadVersion(cfg),
+		static:       newAssetFS(os.DirFS(cfg.StaticPath)),
+		templates:    os.DirFS(cfg.TemplatePath),
 		clientAssets: map[string]*assetFS{},
 	}
+	s.games.Store(games)
 
-	staticFS, err := fs.Sub(assets.FS, "static")
-	if err != nil {
-		return nil, err
-	}
-	if cfg.StaticPath != "" {
-		staticFS = os.DirFS(cfg.StaticPath)
-	}
-	s.static = newAssetFS(staticFS)
-
-	if s.templates, err = fs.Sub(assets.FS, "templates"); err != nil {
-		return nil, err
-	}
-	if cfg.TemplatePath != "" {
-		s.templates = os.DirFS(cfg.TemplatePath)
+	for _, need := range []struct{ option, dir, file string }{
+		{"static_path", cfg.StaticPath, "scripts/client.js"},
+		{"template_path", cfg.TemplatePath, "client.html"},
+	} {
+		if _, err := os.Stat(filepath.Join(need.dir, need.file)); err != nil {
+			return nil, fmt.Errorf("%s ('%s') does not hold crawl's browser client (no %s): "+
+				"run from crawl-ref/source of a crawl built with `make WEBTILES=y`, or set %s",
+				need.option, need.dir, need.file, need.option)
+		}
 	}
 
+	var err error
 	s.sockDir, err = os.MkdirTemp(cfg.ServerSocketPath, "webtiles-")
 	if err != nil {
 		return nil, err
@@ -83,14 +83,27 @@ func New(cfg *config.Config, games *config.GameSet, db *userdb.DB) (*Server, err
 	return s, nil
 }
 
-// loadVersion returns the crawl version to tell browsers, which they use to
-// key their caches: the one of the crawl checkout the server runs in if there
-// is one, otherwise the one the built-in client came from.
-func loadVersion(cfg *config.Config) string {
-	data, err := os.ReadFile(filepath.Join(cfg.ServerPath, "webtiles", "version.txt"))
-	if err != nil {
-		data, err = assets.FS.ReadFile("version.txt")
+func (s *Server) gameSet() *config.GameSet { return s.games.Load() }
+
+// ReloadGames rereads the game definitions, so that games can be added or
+// pointed at a new crawl build without restarting. Games in progress are not
+// affected. If the new definitions are faulty the old ones stay in force.
+func (s *Server) ReloadGames() error {
+	if !s.cfg.DGLMode {
+		return nil
 	}
+	games, err := config.LoadGames(s.cfg)
+	if err != nil {
+		return err
+	}
+	s.games.Store(games)
+	return nil
+}
+
+// version returns the crawl version to tell browsers, which they use to key
+// their caches. It is read each time so that it follows the checkout.
+func (s *Server) version() string {
+	data, err := os.ReadFile(filepath.Join(s.cfg.ServerPath, "webtiles", "version.txt"))
 	if err != nil {
 		return "unknown"
 	}
@@ -142,7 +155,7 @@ func (s *Server) Run(ctx context.Context) error {
 	httpServer := &http.Server{Handler: s.routes(), ReadHeaderTimeout: 30 * time.Second}
 	serveErr := make(chan error, 1)
 	go func() { serveErr <- httpServer.Serve(ln) }()
-	log.Printf("DCSS Webtiles server started on %s (PID: %d, crawl %s)", ln.Addr(), os.Getpid(), s.version)
+	log.Printf("DCSS Webtiles server started on %s (PID: %d, crawl %s)", ln.Addr(), os.Getpid(), s.version())
 
 	select {
 	case err := <-serveErr:

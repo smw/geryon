@@ -25,7 +25,7 @@ type Config struct {
 	PasswordDB string `yaml:"password_db"`
 	SettingsDB string `yaml:"settings_db"`
 
-	// Empty means: serve the copies embedded in the binary.
+	// The version-independent part of crawl's browser client.
 	StaticPath   string `yaml:"static_path"`
 	TemplatePath string `yaml:"template_path"`
 
@@ -70,6 +70,8 @@ func Defaults() *Config {
 		BindAddress:        "",
 		BindPort:           8080,
 		PasswordDB:         "./webserver/passwd.db3",
+		StaticPath:         "./webserver/static",
+		TemplatePath:       "./webserver/templates",
 		InitPlayerProgram:  "./util/webtiles-init-player.sh",
 		DGLMode:            true,
 		GameDataNoCache:    true,

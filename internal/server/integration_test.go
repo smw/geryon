@@ -19,7 +19,6 @@ import (
 	"time"
 
 	"github.com/gorilla/websocket"
-	"gopkg.in/yaml.v3"
 
 	"github.com/smw/geryon/internal/config"
 	"github.com/smw/geryon/internal/userdb"
@@ -55,6 +54,28 @@ func crawlSource(t *testing.T) string {
 	return source
 }
 
+// writeGameDef adds a game to the server directory's games.d.
+func writeGameDef(t *testing.T, dir, source, id, name string) {
+	t.Helper()
+	def := fmt.Sprintf(`games:
+  - id: %[3]s
+    name: %[4]s
+    crawl_binary: %[2]s/crawl
+    rcfile_path: %[1]s/rcs/
+    macro_path: %[1]s/rcs/
+    morgue_path: %[1]s/rcs/morgue/%%n
+    socket_path: %[1]s/rcs
+    inprogress_path: %[1]s/rcs/running
+    ttyrec_path: %[1]s/rcs/ttyrecs/%%n
+    client_path: %[2]s/webserver/game_data/
+    cwd: %[1]s/work
+    show_save_info: true
+`, dir, source, id, name)
+	if err := os.WriteFile(filepath.Join(dir, "games.d", id+".yaml"), []byte(def), 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func startTestServer(t *testing.T, tweak func(*config.Config)) *testServer {
 	source := crawlSource(t)
 	dir := t.TempDir()
@@ -84,38 +105,27 @@ fi
 	port := ln.Addr().(*net.TCPAddr).Port
 	ln.Close()
 
-	games := fmt.Sprintf(`
-- id: test
-  name: Test game
-  crawl_binary: %[2]s/crawl
-  rcfile_path: %[1]s/rcs/
-  macro_path: %[1]s/rcs/
-  morgue_path: %[1]s/rcs/morgue/%%n
-  socket_path: %[1]s/rcs
-  inprogress_path: %[1]s/rcs/running
-  ttyrec_path: %[1]s/rcs/ttyrecs/%%n
-  client_path: %[2]s/webserver/game_data/
-  cwd: %[1]s/work
-  show_save_info: true
-`, dir, source)
+	if err := os.Mkdir(filepath.Join(dir, "games.d"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	writeGameDef(t, dir, source, "test", "Test game")
 
 	cfg := config.Defaults()
 	cfg.ServerPath = dir
 	cfg.BindAddress, cfg.BindPort = "127.0.0.1", port
 	cfg.PasswordDB = filepath.Join(dir, "passwd.db3")
 	cfg.SettingsDB = filepath.Join(dir, "user_settings.db3")
+	cfg.StaticPath = filepath.Join(source, "webserver", "static")
+	cfg.TemplatePath = filepath.Join(source, "webserver", "templates")
 	cfg.InitPlayerProgram = initScript
 	cfg.ServerSocketPath = dir
 	cfg.CryptAlgorithm = "6"
 	cfg.KillTimeout = 5
-	if err := yaml.Unmarshal([]byte(games), &cfg.Games); err != nil {
-		t.Fatal(err)
-	}
 	if tweak != nil {
 		tweak(cfg)
 	}
 
-	gameSet, err := config.LoadGames(cfg, os.DirFS(dir))
+	gameSet, err := config.LoadGames(cfg)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -821,6 +831,41 @@ func TestStuckGameDelaysNobody(t *testing.T) {
 	if took := time.Since(start); took > 5*time.Second {
 		t.Errorf("other activity took %v while a game was stuck", took)
 	}
+}
+
+// The game list can change while the server runs, as it does when a new crawl
+// build is installed: new games appear, and a game in progress is untouched.
+func TestReloadGames(t *testing.T) {
+	ts := startTestServer(t, nil)
+	source := crawlSource(t)
+	alice := ts.connect("alice", false)
+	startGame(alice, "Alice")
+
+	writeGameDef(t, ts.dir, source, "newer", "Newer game")
+	if err := ts.srv.ReloadGames(); err != nil {
+		t.Fatal(err)
+	}
+	// A broken definition is rejected and changes nothing.
+	os.WriteFile(filepath.Join(ts.dir, "games.d", "broken.yaml"),
+		[]byte("games:\n  - id: broken\n    name: Broken\n"), 0o644)
+	if err := ts.srv.ReloadGames(); err == nil {
+		t.Error("a game definition with no crawl_binary was accepted")
+	}
+	os.Remove(filepath.Join(ts.dir, "games.d", "broken.yaml"))
+
+	alice.key('s')
+	alice.expectMatch("player", func(m map[string]any) bool { return m["turn"] != nil })
+
+	bob := ts.connect("bob", false)
+	bob.expect("lobby_complete")
+	bob.register("Bob", "pw")
+	links := fmt.Sprint(bob.expect("set_game_links")["content"])
+	if !strings.Contains(links, `#play-test"`) || !strings.Contains(links, `<a href="#play-newer">Newer game</a>`) {
+		t.Errorf("game links after reload: %s", links)
+	}
+	bob.send(map[string]any{"msg": "play", "game_id": "newer"})
+	bob.expect("game_started")
+	bob.expect("map")
 }
 
 func TestOutbox(t *testing.T) {

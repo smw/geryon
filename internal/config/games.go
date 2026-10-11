@@ -273,10 +273,10 @@ func parseGamesFile(data []byte, source string) gameDefs {
 	}
 }
 
-// LoadGames builds the game set from config.yml and games.d/*.yaml. The
-// games.d directory is read from the server path if it exists there, and from
-// fallback (the copy embedded in the binary) otherwise.
-func LoadGames(c *Config, fallback fs.FS) (*GameSet, error) {
+// LoadGames builds the game set from config.yml and the games.d/*.yaml files
+// in the server path. It reads the files afresh each time, so calling it again
+// picks up changes.
+func LoadGames(c *Config) (*GameSet, error) {
 	set := &GameSet{byID: map[string]*Game{}, templates: map[string]*Game{}}
 
 	merge := func(defs gameDefs) error {
@@ -321,11 +321,8 @@ func LoadGames(c *Config, fallback fs.FS) (*GameSet, error) {
 		useDir = *c.UseGameYAML
 	}
 	if useDir {
-		var dir fs.FS = os.DirFS(filepath.Join(c.ServerPath, "games.d"))
 		where := filepath.Join(c.ServerPath, "games.d")
-		if _, err := fs.Stat(dir, "."); err != nil {
-			dir, where = fallback, "built-in games.d"
-		}
+		dir := os.DirFS(where)
 		entries, err := fs.ReadDir(dir, ".")
 		if err != nil {
 			log.Printf("Skipping unreadable game configuration directory %s: %v", where, err)
