@@ -80,7 +80,8 @@ jobs:
           fi
           # Only the built tree is needed from here on.
           rm -rf crawl/.git
-          find crawl \( -name '*.o' -o -name '*.d' \) -delete
+          # (-type f: crawl also has directories named *.d, such as games.d)
+          find crawl -type f \( -name '*.o' -o -name '*.d' \) -delete
 
       - name: Test
         run: make test CRAWL_SOURCE=crawl/crawl-ref/source
