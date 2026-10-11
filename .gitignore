@@ -1,0 +1,13 @@
+# The built binary and release archives.
+/geryon
+/dist/
+
+# The browser client, copied from a crawl checkout by `make client`.
+/client/static/
+/client/templates/
+/client/game_data/
+/client/games.d/
+/client/version.txt
+
+# A crawl checkout, when CI or a developer keeps one inside the repository.
+/crawl/

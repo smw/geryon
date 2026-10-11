@@ -1,0 +1,111 @@
+name: CI
+
+# Every push and pull request: build crawl (cached), run the tests against it,
+# and build the release archives. A tag starting with "v" also publishes those
+# archives as a GitHub release.
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref_type != 'tag' }}
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # tags, for the version stamped into the binary
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      # Crawl supplies the browser client that is embedded in the binary and
+      # the game the integration tests play. It is built from the commit named
+      # in CRAWL_VERSION, which takes a while, so the result is cached.
+      - name: Read the crawl version
+        id: crawl
+        run: echo "sha=$(tr -d '[:space:]' < CRAWL_VERSION)" >> "$GITHUB_OUTPUT"
+
+      - name: Install crawl's dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential bison flex pkg-config python3-yaml advancecomp \
+            libncursesw5-dev liblua5.4-dev libsqlite3-dev libz-dev libpng-dev \
+            libsdl2-dev libsdl2-image-dev libsdl2-mixer-dev libfreetype6-dev
+
+      - name: Restore the crawl build
+        id: crawl-cache
+        uses: actions/cache@v4
+        with:
+          path: crawl
+          key: crawl-${{ runner.os }}-${{ runner.arch }}-${{ steps.crawl.outputs.sha }}-v1
+
+      - name: Build crawl
+        if: steps.crawl-cache.outputs.cache-hit != 'true'
+        run: |
+          # All history, without file contents: crawl's version comes from `git describe`.
+          git clone --filter=blob:none --no-checkout https://github.com/crawl/crawl.git crawl
+          git -C crawl checkout --detach "${{ steps.crawl.outputs.sha }}"
+          make -C crawl/crawl-ref/source -j"$(nproc)" WEBTILES=y
+          # Only the built tree is needed from here on.
+          rm -rf crawl/.git
+          find crawl -name '*.o' -delete -o -name '*.d' -delete
+
+      - name: Copy the browser client into the build
+        run: scripts/sync-client.sh crawl/crawl-ref/source
+
+      - name: Check formatting and vet
+        run: |
+          test -z "$(gofmt -l .)" || { echo "gofmt needed:"; gofmt -l .; exit 1; }
+          go vet ./...
+
+      - name: Test
+        run: go test -race ./...
+        env:
+          GERYON_CRAWL_SOURCE: ${{ github.workspace }}/crawl/crawl-ref/source
+
+      - name: Build release archives
+        run: |
+          version=$(git describe --tags --always)
+          mkdir -p dist
+          for arch in amd64 arm64; do
+            CGO_ENABLED=0 GOOS=linux GOARCH=$arch go build -trimpath \
+              -ldflags "-s -w -X main.version=$version" -o dist/geryon ./cmd/geryon
+            tar -C dist -czf "dist/geryon-$version-linux-$arch.tar.gz" geryon -C .. README.md
+            rm dist/geryon
+          done
+          (cd dist && sha256sum *.tar.gz > SHA256SUMS)
+          ls -l dist
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: geryon
+          path: dist/
+          if-no-files-found: error
+
+  release:
+    if: github.ref_type == 'tag'
+    needs: build
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: geryon
+          path: dist
+      - name: Publish the release
+        run: gh release create "$GITHUB_REF_NAME" dist/* --repo "$GITHUB_REPOSITORY" --title "$GITHUB_REF_NAME" --generate-notes
+        env:
+          GH_TOKEN: ${{ github.token }}
